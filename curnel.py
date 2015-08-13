@@ -1,7 +1,6 @@
 import numpy as np
 import ast
 import inspect
-import sys
 from collections import deque
 
 _indent = "    "
@@ -170,7 +169,7 @@ class CurnelStripModuleAndFuncDef(ast.NodeVisitor):
 
 
 
-class CurnelPythonCCompiler(object):
+class CurnelPythonCCompiler(ast.NodeVisitor):
 
     _unop_map = {
         ast.UAdd   : '+',
@@ -216,38 +215,12 @@ class CurnelPythonCCompiler(object):
     }
 
     def __init__(self, kernel, kfunc):
-        self._node_handlers = {
-            ast.Assign    : self._handle_assign,
-            ast.AugAssign : self._handle_augassign,
-            ast.If        : self._handle_if,
-            ast.For       : self._handle_for,
-            ast.While     : self._handle_while,
-            ast.Break     : self._handle_break,
-            ast.Continue  : self._handle_continue,
-            ast.Expr      : self._handle_expr,
-            ast.UnaryOp   : self._handle_unaryop,
-            ast.BinOp     : self._handle_binop,
-            ast.BoolOp    : self._handle_boolop,
-            ast.Compare   : self._handle_cmpr,
-            ast.IfExp     : self._handle_ifexp,
-            ast.Attribute : self._handle_attr,
-            ast.Subscript : self._handle_subscript,
-            ast.Index     : self._handle_index,
-            ast.Name      : self._handle_name,
-            ast.Num       : self._handle_num,
-            ast.Tuple     : self._handle_tuple
-        }
-    
-        if sys.version_info >= (3, 0):
-            self._node_handlers[ast.Starred] = self._handle_starred
-            self._node_handlers[ast.Bytes] = self._handle_bytes
-    
-        if sys.version_info >= (3, 4):
-            self._node_handlers[ast.NameConstant] = self._handle_name_const
-    
+        ast.NodeVisitor.__init__(self)
+        
         func_string = inspect.getsourcelines(kfunc)
         func_string = '\n'.join(func_string[0][1:])
 
+        self._code_stack = deque()
         self._ctxt_stack = deque()
         self._loop_counter = 0
         self._loop_else_stack = deque()
@@ -259,6 +232,9 @@ class CurnelPythonCCompiler(object):
         #print ast.dump(self.tree)
         self.kernel = kernel
 
+    def _process_ast_node(self, node):
+        self.visit(node)
+        return self._code_stack.pop()
 
     def _node_string(self, node):
         global _indent
@@ -268,31 +244,28 @@ class CurnelPythonCCompiler(object):
         else:
             return _indent + self._process_ast_node(node) + ";\n"
 
-
-    def _handle_assign(self, anode):
+    def visit_Assign(self, anode):
         t_string = ""
 
         for tar in anode.targets:
             t_string += self._process_ast_node(tar) + " = "
         t_string += self._process_ast_node(anode.value)
 
-        return t_string
+        self._code_stack.append(t_string)
 
-
-    def _handle_augassign(self, aunode):
+    def visit_AugAssign(self, aunode):
         otype = type(aunode.op)
         t_string = self._process_ast_node(aunode.target)
         v_string = self._process_ast_node(aunode.value)
         if otype == ast.FloorDiv:
-            return t_string + " = floor(" + t_string + " / " + v_string + ")"
+            self._code_stack.append(t_string + " = floor(" + t_string + " / " + v_string + ")")
         elif otype == ast.Pow:
-            return t_string + " = pow(" + t_string + ", " + v_string + ")"
+            self._code_stack.append(t_string + " = pow(" + t_string + ", " + v_string + ")")
         else:
             o_string = CurnelPythonCCompiler._binop_map[otype]
-            return t_string + ' ' + o_string + '= ' + v_string
+            self._code_stack.append(t_string + ' ' + o_string + '= ' + v_string)
 
-
-    def _handle_if(self, ifnode):
+    def visit_If(self, ifnode):
         t_string = self._process_ast_node(ifnode.test)
         b_string = ""
         for bnode in ifnode.body:
@@ -314,15 +287,13 @@ class CurnelPythonCCompiler(object):
         if else_string != "":
             out_str += " else {\n" + else_string + "}\n" 
 
-        return out_str
+        self._code_stack.append(out_str)
 
-
-    def _handle_for(self, fornode):
+    def visit_For(self, fornode):
         ## TODO: Figure out how to handle for loops
-        return ""
+        self._code_stack.append("")
 
-
-    def _handle_while(self, winode):
+    def visit_While(self, winode):
         if winode.orelse:
             has_else = True
         else:
@@ -352,23 +323,27 @@ class CurnelPythonCCompiler(object):
         
         self._loop_else_stack.pop()
 
-        return out_str
+        self._code_stack.append(out_str)
 
+    def visit_Expr(self, enode):
+        self._code_stack.append(self.visit(enode.value))
 
-    def _handle_binop(self, binode):
+    def visit_UnaryOp(self, unode):
+        self._code_stack.append(CurnelPythonCCompiler._unop_map[type(unode.op)] + '(' + self._process_ast_node(unode.operand) + ')')
+
+    def visit_BinOp(self, binode):
         l_string = self._process_ast_node(binode.left)
         r_string = self._process_ast_node(binode.right)
         otype = type(binode.op)
         if otype == ast.FloorDiv:
-            return "floor(" + l_string + " / " + r_string + ")"
+            self._code_stack.append("floor(" + l_string + " / " + r_string + ")")
         elif otype == ast.Pow:
-            return "pow(" + l_string + ", " + r_string + ")"
+            self._code_stack.append("pow(" + l_string + ", " + r_string + ")")
         else:
             o_string = CurnelPythonCCompiler._binop_map[otype]
-            return "(" + l_string + o_string + r_string + ")"
+            self._code_stack.append("(" + l_string + o_string + r_string + ")")
 
-
-    def _handle_boolop(self, boolop):
+    def visit_BoolOp(self, boolop):
         otype = type(boolop.op)
         out_str = ""
         
@@ -381,10 +356,9 @@ class CurnelPythonCCompiler(object):
         for val in boolop.values[1:]:
             out_str += o_string + self._process_ast_node(val)
             
-        return '(' + out_str + ')'
+        self._code_stack.append('(' + out_str + ')')
             
-
-    def _handle_cmpr(self, cmprop):
+    def visit_Compare(self, cmprop):
         op_strings = []
         for op in cmprop.ops:
             if type(op) == ast.In or type(op) == ast.NotIn:
@@ -404,19 +378,23 @@ class CurnelPythonCCompiler(object):
             else:
                 val_strings[i] = '(' + val_strings[i] + ' ' + op_strings[i] + ' ' + val_strings[i+1] + ')'
 
-        return ' && '.join(val_strings[:-1])
+        self._code_stack.append(' && '.join(val_strings[:-1]))
 
-
-    def _handle_ifexp(self, ienode):
+    def visit_IfExp(self, ienode):
         sif_string = "(" + self._process_ast_node(ienode.test) + ") ? "
         sif_string += "(" + self._process_ast_node(ienode.body) + ") : "
         sif_string += "(" + self._process_ast_node(ienode.orelse) + ")"
-        return sif_string
+        self._code_stack.append(sif_string)
 
+    def visit_Attribute(self, anode):
+        n_string = self.visit(anode.value)
+        if n_string != self._kernelname:
+            raise Exception("Dot operator not supported.")
+        self._code_stack.append(str(anode.attr))
     
-    def _handle_subscript(self, ssnode):
+    def visit_Subscript(self, ssnode):
         sli_list = self._process_ast_node(ssnode.slice)
-
+        
         if not isinstance(sli_list, list):
             sli_list = [sli_list]
         subscripts = len(sli_list)
@@ -454,97 +432,55 @@ class CurnelPythonCCompiler(object):
             self._subscript_var = None
             out_string += sli_string + "]"
 
+        self._code_stack.append(out_string)
 
-        return out_string
+    def visit_Index(self, inode):
+        self._subscript_cnt_stack.append(0)
+        out_string = self._process_ast_node(inode.value)
+        self._subscript_cnt_stack.pop()
+        self._code_stack.append(out_string)
 
-
-    def _handle_name(self, nnode):
+    def visit_Name(self, nnode):
         if nnode.id in CurnelPythonCCompiler._const_name_map:
-            return CurnelPythonCCompiler._const_name_map[nnode.id]
+            self._code_stack.append(CurnelPythonCCompiler._const_name_map[nnode.id])
         if self.kernel.getvar(nnode.id) == None:
             raise Exception("Name '%s' not defined as input, output, locally, or as a constant for the kernel." % nnode.id)
         else:
-            return str(nnode.id)
+            self._code_stack.append(str(nnode.id))
 
-
-    def _handle_name_const(self, ncnode):
-        return ""
-
+    def visit_NameConstant(self, ncnode):
+        self._code_stack.append("")
 
     # Only handles packing/unpacking and assignment contexts!
-    def _handle_tuple(self, tnode):
+    def visit_Tuple(self, tnode):
         if self._ctxt_stack[-2] in (ast.Assign, ast.For, ast.Index):
             strings = []
             for elem in tnode.elts:
                 strings.append(self._process_ast_node(elem))
-            return strings
+            self._code_stack.append(strings)
         else:
             raise Exception("Tuple support is only available in non-nested packing/unpacking and assignment contexts.")
 
-            
-    def _handle_break(self, cnode):
+    def visit_Break(self, node):
         if self._loop_else_stack[-1][0]:
-            return "did_break_" + str(self._loop_else_stack[-1][1]) + " = 1; break"
+            self._code_stack.append("did_break_" + str(self._loop_else_stack[-1][1]) + " = 1; break")
         else:
-            return "break"
+            self._code_stack.append("break")
 
-            
-    def _handle_continue(self, cnode):
-        return "continue"
-        
-        
-    def _handle_expr(self, cnode):
-        return self._process_ast_node(cnode.value)
-        
-        
-    def _handle_unaryop(self, cnode):
-        return CurnelPythonCCompiler._unop_map[type(cnode.op)] + '(' + self._process_ast_node(cnode.operand) + ')'
-        
-    
-    def _handle_attr(self, cnode):
-        n_string = self._process_ast_node(cnode.value)
-        if n_string != self._kernelname:
-            raise Exception("Dot operator not supported.")
-        return str(cnode.attr)
-    
-    
-    def _handle_index(self, cnode):
-        self._subscript_cnt_stack.append(0)
-        out_string = self._process_ast_node(cnode.value)
-        self._subscript_cnt_stack.pop()
-        return out_string
-       
-       
-    def _handle_starred(self, cnode):
-        n_string = self._process_ast_node(cnode.value)
-        return '&(' + n_string + ')'
-    
-    
-    def _handle_num(self, cnode):
-        return str(cnode.n)
-    
-    
-    def _handle_str(self, cnode):
-        return '"' + cnode.s + '"'
-    
-    
-    def _handle_bytes(self, cnode):
-        return '"' + cnode.s + '"'
-    
-    
-    def _process_ast_node(self, cnode):
-        ntype = type(cnode)
+    def visit_Continue(self, node):
+        self._code_stack.append("continue")
 
-        self._ctxt_stack.append(ntype)
-        
-        try:
-            return self._node_handlers[ntype](cnode)
-        except:
-            raise Exception("Feature %s is unsupported by the compiler." % ntype.__name__)
-        
+    def visit_Num(self, nnode):
+        self._code_stack.append(str(nnode.n))
+
+    def visit_Str(self, snode):
+        self._code_stack.append('"' + snode.s + '"')
+
+    def visit(self, cnode):
+        self._ctxt_stack.append(type(cnode))
+        ast.NodeVisitor.visit(self, cnode)
         self._ctxt_stack.pop()
 
-        
     def compile(self):
         self.code = ""
 
@@ -554,15 +490,15 @@ class CurnelPythonCCompiler(object):
 
         # Extract the arguments node and the lines of CUDA to parse
         args_node = stripper.children[0]
-        cu_nodes = stripper.children[1:]
+        nodes = stripper.children[1:]
 
         # Make sure we only have 1 argument to the function
         assert len(args_node.args) == 1
         args_node.args[0].arg = self._kernelname
 
-        for cnode in cu_nodes:
+        for cnode in nodes:
             self.code += self._node_string(cnode)
-            
+
         return self.code
 
 
@@ -573,19 +509,18 @@ def cuda_kernel(kfunc):
     return kfunc_wrapper
 
 
-
 ### Example of final code appearance
 @cuda_kernel
 def mapping(k):
-    row = HEIGHT - x - 1			# flip vertically
+    row = HEIGHT - x - 1            # flip vertically
     if x < HEIGHT and y < WIDTH:
         val = ss[x,y]
-        if val > 0.:				# water above 0. degrees
+        if val > 0.:                # water above 0. degrees
             maploc = val * RANGE_SCALE
             rgbimg[row,x,0] = cm[maploc,0]
             rgbimg[row,x,1] = cm[maploc,1]
             rgbimg[row,x,2] = cm[maploc,2]
-        elif val <= -100.:			# color it black for land
+        elif val <= -100.:            # color it black for land
             rgbimg[row,x,0] = 32
             rgbimg[row,x,1] = 32
             rgbimg[row,x,2] = 32
@@ -595,7 +530,7 @@ def mapping(k):
             rgbimg[row,x,0] = 255
             rgbimg[row,x,1] = d
             rgbimg[row,x,2] = 255
-        else:					# frozen water, gray
+        else:                    # frozen water, gray
             rgbimg[row,x,0] = 190
             rgbimg[row,x,1] = 190
             rgbimg[row,x,2] = 190

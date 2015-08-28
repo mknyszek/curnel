@@ -31,130 +31,24 @@ class CurnelVariable:
         np.dtype(np.float64)    : "double"    \
     }
 
+    _numpy_ctypes_map_inv = dict((v, k) for k, v in _numpy_ctypes_map.iteritems())
+
     def __init__(self, name, value):
         self.name = name
         self.value = value
         if isinstance(value, np.ndarray) and value.dtype in CurnelVariable._numpy_ctypes_map:
             self.ctype = CurnelVariable._numpy_ctypes_map[value.dtype]
+            self.stype = self.ctype
             if len(value.shape) > 0:
                 self.ctype += "*";
             self.shape = value.shape
         elif np.dtype(type(value)) in CurnelVariable._numpy_ctypes_map:
             self.ctype = CurnelVariable._numpy_ctypes_map[np.dtype(type(value))]
+            self.stype = self.ctype
             self.shape = ()
         else:
-            raise Exception("Data type %s is unsupported!" % type(value)) 
-
-
-class Curnel:
-
-    def __init__(self, kfunc):
-        self._program = ""
-        self._dims = None
-        self._input = {}
-        self._output = {}
-        self._local = {}
-        self._constants = {}
-        self._kfunc = kfunc
-        self._local["x"] = CurnelVariable("x", np.int32(0))
-        self._local["y"] = CurnelVariable("y", np.int32(0))
-        self._local["z"] = CurnelVariable("z", np.int32(0))
-
-    def __get_attr__(self, name):
-        if name in self._input:
-            return self._input[name]
-        elif name in self._output:
-            return self._output[name]
-        elif name in self._local:
-            return self._local[name]
-        elif name in self._constants:
-            return self._constants[name]
-        else:
-            raise AttributeError()
-
-    def getvar(self, name):
-        if name in self._input:
-            return self._input[name]
-        elif name in self._output:
-            return self._output[name]
-        elif name in self._local:
-            return self._local[name]
-        elif name in self._constants:
-            return self._constants[name]
-        else:
-            return None
-
-    def generate(self):
-        global _indent
-
-        self._program += "#include <stdint.h>\n\n"
-
-        for name, var in self._constants.items():
-            self._program += "#define " + name + " " + str(var.value) + "\n"
-
-        self._program += "\n__global__ void " + self._kfunc.__name__ + "("
+            raise Exception("Data type %s is unsupported!" % type(value))
         
-        for name, var in self._input.items():
-            self._program += "const " + var.ctype + " " + name + ", "
-
-        for name, var in self._output.items():
-            self._program += var.ctype + " " + name + ", "
-            
-        self._program += "\b\b) {\n"
-
-        for name, var in self._local.items():
-            self._program += _indent + var.ctype + " " + name + " = " + str(var.value) + ";\n"
-
-        if len(self._dims) >= 1:
-            self._program += _indent + "x = threadIdx.x + blockIdx.x * blockDim.x;\n"
-        if len(self._dims) >= 2:
-            self._program += _indent + "y = threadIdx.y + blockIdx.y * blockDim.y;\n"
-        if len(self._dims) >= 3:
-            self._program += _indent + "z = threadIdx.z + blockIdx.z * blockDim.z;\n"
-
-        self._program += self._kfunc(self)
-
-        self._program += "}\n"
-
-        print self._program
-
-    def put(self):
-        pass
-    
-    def run(self):
-        pass
-
-    def get(self):
-        pass
-
-    def execute(self):
-        self.generate()
-        self.put()
-        self.run()
-        self.get()
-
-    def setDimensions(self, *dims):
-        if len(dims) < 1 or len(dims) > 3:
-            raise Exception("Only 1D, 2D, and 3D data is supported by CUDA.")
-        self._dims = dims
-
-    def setInput(self, **inputvars):
-        for name, value in inputvars.items():
-            self._input[name] = CurnelVariable(name, value)
-
-    def setOutput(self, **outputvars):
-        for name, value in outputvars.items():
-            self._output[name] = CurnelVariable(name, value)
-
-    def setLocal(self, **localvars):
-        for name, value in localvars.items():
-            self._local[name] = CurnelVariable(name, value)
-
-    def setConstants(self, **constants):
-        for name, value in constants.items():
-            self._constants[name] = CurnelVariable(name, value)
-
-
 
 class CurnelStripModuleAndFuncDef(ast.NodeVisitor):
 
@@ -168,6 +62,56 @@ class CurnelStripModuleAndFuncDef(ast.NodeVisitor):
             self.children.append(n)
         self.generic_visit(node)
 
+
+class CurnelFindType(ast.NodeVisitor):
+
+    def __init__(self, args, variables):
+        ast.NodeVisitor.__init__(self)
+        self._variables = variables
+        self._args = args
+        self.type = None
+    
+
+    def _get_var(self, name):
+        for var in self._variables:
+            if var.name == name:
+                return var
+
+        for var in self._args:
+            if var.name == name:
+                return var
+
+        return None
+
+
+    def visit_Name(self, node):
+        var = self._get_var(node.id)
+        if var != None:
+            t = CurnelVariable._numpy_ctypes_map_inv[var.stype]
+            self.set_type_on_visit(t)
+        self.generic_visit(node)
+
+
+    def visit_Attribute(self, node):
+        if type(node.value) == ast.Name and node.value.id in ["threadIdx", "blockDim"] and node.attr in ["x", "y", "z"]:
+            self.set_type_on_visit(np.dtype('int32'))
+
+
+    def visit_Num(self, node):
+        t = np.dtype(type(node.n))
+        self.set_type_on_visit(t)
+        self.generic_visit(node)
+
+
+    def set_type_on_visit(self, t):
+        if self.type == None:
+            self.type = t
+        elif t.itemsize > self.type.itemsize and t.kind == 'f' and self.type.kind == 'f':
+            self.type = t
+        elif t.itemsize > self.type.itemsize and t.kind in ('u', 'i') and self.type.kind in ('u', 'i'):
+            self.type = t
+        elif t.kind == 'f' and self.type.kind in ('u', 'i'):
+            self.type = t
 
 
 class CurnelPythonCCompiler(object):
@@ -215,7 +159,7 @@ class CurnelPythonCCompiler(object):
         'None'  : 'NULL'
     }
 
-    def __init__(self, kernel, kfunc):
+    def __init__(self, kfunc, args, constants):
         self._node_handlers = {
             ast.Assign    : self._handle_assign,
             ast.AugAssign : self._handle_augassign,
@@ -248,17 +192,64 @@ class CurnelPythonCCompiler(object):
         func_string = inspect.getsourcelines(kfunc)
         func_string = '\n'.join(func_string[0][1:])
 
+        self._arg_vals = args
+        self._args = []
+        self._variables = []
+        self._constants = [CurnelVariable(name, val) for name, val in constants.items()]
+
         self._ctxt_stack = deque()
         self._loop_counter = 0
         self._loop_else_stack = deque()
-        self._kernelname = ""
         self._subscript_cnt_stack = deque([0])
         self._subscript_var = None
         self.code = ""
         self.tree = ast.parse(func_string)
+        self._kfunc = kfunc
         #print ast.dump(self.tree)
-        self.kernel = kernel
 
+
+    def _is_name(self, name):
+        return name in [var.name for var in self._variables] or \
+               name in [var.name for var in self._args] or \
+               name in [var.name for var in self._constants]
+
+
+    def _get_var(self, name):
+        for var in self._variables:
+            if var.name == name:
+                return var
+
+        for var in self._args:
+            if var.name == name:
+                return var
+
+        return None
+
+
+    def _get_node_type(self, node):
+        c = CurnelFindType(self._args, self._variables)
+        c.visit(node)
+        if c.type == None:
+            raise Exception("Ambiguous typing; unable to resolve type.")
+        return np.asarray(0, dtype=c.type)
+        
+
+    def _process_ast_node(self, cnode):
+        ntype = type(cnode)
+
+        self._ctxt_stack.append(ntype)
+        
+        try:
+            self._node_handlers[ntype]
+        except:
+            raise Exception("Feature %s is unsupported by the compiler." % ntype.__name__)
+
+        val = self._node_handlers[ntype](cnode)
+        
+        self._ctxt_stack.pop()
+
+        return val
+        
 
     def _node_string(self, node):
         global _indent
@@ -271,18 +262,23 @@ class CurnelPythonCCompiler(object):
 
     def _handle_assign(self, anode):
         t_string = ""
+        v_string = self._process_ast_node(anode.value)
+        
+        first_tar = anode.targets[0]
+        if type(first_tar) == ast.Name and type(first_tar.ctx) == ast.Store:
+            self._variables.append(CurnelVariable(first_tar.id, self._get_node_type(anode.value)))
+            t_string += self._variables[-1].ctype + " "
 
         for tar in anode.targets:
             t_string += self._process_ast_node(tar) + " = "
-        t_string += self._process_ast_node(anode.value)
 
-        return t_string
+        return t_string + v_string
 
 
     def _handle_augassign(self, aunode):
         otype = type(aunode.op)
-        t_string = self._process_ast_node(aunode.target)
         v_string = self._process_ast_node(aunode.value)
+        t_string = self._process_ast_node(aunode.target)
         if otype == ast.FloorDiv:
             return t_string + " = floor(" + t_string + " / " + v_string + ")"
         elif otype == ast.Pow:
@@ -429,7 +425,7 @@ class CurnelPythonCCompiler(object):
         sli_string = ""
 
         if type(ssnode.value) != ast.Subscript:
-            var = self.kernel.getvar(val_string)
+            var = self._get_var(val_string)
             if var == None:
                 raise Exception("Name '%s' not defined as input, output, locally, or as a constant for the kernel." % val_string)
             elif len(var.shape) < self._subscript_cnt_stack[-1]:
@@ -454,17 +450,16 @@ class CurnelPythonCCompiler(object):
             self._subscript_var = None
             out_string += sli_string + "]"
 
-
         return out_string
 
 
     def _handle_name(self, nnode):
         if nnode.id in CurnelPythonCCompiler._const_name_map:
             return CurnelPythonCCompiler._const_name_map[nnode.id]
-        if self.kernel.getvar(nnode.id) == None:
-            raise Exception("Name '%s' not defined as input, output, locally, or as a constant for the kernel." % nnode.id)
-        else:
+        elif self._ctxt_stack[-2] == ast.Attribute or self._is_name(nnode.id):
             return str(nnode.id)
+        else:
+            raise Exception("Name '%s' not defined as an argument, locally, or as a constant for the kernel." % nnode.id)
 
 
     def _handle_name_const(self, ncnode):
@@ -503,10 +498,13 @@ class CurnelPythonCCompiler(object):
     
     def _handle_attr(self, cnode):
         n_string = self._process_ast_node(cnode.value)
-        if n_string != self._kernelname:
-            raise Exception("Dot operator not supported.")
-        return str(cnode.attr)
-    
+        if n_string in ["threadIdx", "blockDim"] and cnode.attr in ["x", "y", "z"]:
+            return n_string + "." + cnode.attr
+        elif n_string == "blockIdx" and cnode.attr in ["x", "y"]:
+            return n_string + "." + cnode.attr
+        else:
+            raise Exception("Unknown attribute or unknown variable: %s" % (n_string + "." + cnode.attr ))
+
     
     def _handle_index(self, cnode):
         self._subscript_cnt_stack.append(0)
@@ -530,19 +528,6 @@ class CurnelPythonCCompiler(object):
     
     def _handle_bytes(self, cnode):
         return '"' + cnode.s + '"'
-    
-    
-    def _process_ast_node(self, cnode):
-        ntype = type(cnode)
-
-        self._ctxt_stack.append(ntype)
-        
-        try:
-            return self._node_handlers[ntype](cnode)
-        except:
-            raise Exception("Feature %s is unsupported by the compiler." % ntype.__name__)
-        
-        self._ctxt_stack.pop()
 
         
     def compile(self):
@@ -556,32 +541,49 @@ class CurnelPythonCCompiler(object):
         args_node = stripper.children[0]
         cu_nodes = stripper.children[1:]
 
-        # Make sure we only have 1 argument to the function
-        assert len(args_node.args) == 1
-        args_node.args[0].arg = self._kernelname
+        i = 0
+        for arg in args_node.args:
+            self._args.append(CurnelVariable(arg.id, self._arg_vals[i]))
+            i += 1
+
+        self.code += "#include <stdint.h>\n\n"
+
+        for var in self._constants:
+            self.code += "#define " + var.name + " " + str(var.value) + "\n"
+
+        self.code += "\n__global__ void " + self._kfunc.__name__ + "("
+
+        for var in self._args:
+            self.code += var.ctype + " " + var.name + ", "
+            
+        self.code += "\b\b) {\n"
 
         for cnode in cu_nodes:
             self.code += self._node_string(cnode)
-            
+
+        self.code += "}\n"
+        
         return self.code
 
 
 # cuda decorator to specify a function as a kernel
-def cuda_kernel(kfunc):
-    def kfunc_wrapper(kernel):
-        return CurnelPythonCCompiler(kernel, kfunc).compile()
-    return kfunc_wrapper
-
-
+def cuda(**kwargs):
+    def cuda_decorator(kfunc):
+        def kfunc_wrapper(*args):
+            return CurnelPythonCCompiler(kfunc, args, kwargs).compile()
+        return kfunc_wrapper
+    return cuda_decorator
 
 ### Example of final code appearance
-@cuda_kernel
-def mapping(k):
-    row = HEIGHT - x - 1			# flip vertically
-    if x < HEIGHT and y < WIDTH:
+@cuda(height=2700, width=3600, range_scale=99./32.)
+def mapping(cm, ss, rgbimg):
+    x = threadIdx.x + blockIdx.x * blockDim.x
+    y = threadIdx.y + blockIdx.y * blockDim.y
+    row = height - x - 1			# flip vertically
+    if x < height and y < width:
         val = ss[x,y]
         if val > 0.:				# water above 0. degrees
-            maploc = val * RANGE_SCALE
+            maploc = val * range_scale
             rgbimg[row,x,0] = cm[maploc,0]
             rgbimg[row,x,1] = cm[maploc,1]
             rgbimg[row,x,2] = cm[maploc,2]
@@ -600,19 +602,12 @@ def mapping(k):
             rgbimg[row,x,1] = 190
             rgbimg[row,x,2] = 190
 
-@cuda_kernel
-def test(k):
+@cuda(height=2700, width=3600, range_scale=99./32.)
+def test(rgbimg):
     rgbimg[y, x, z] = 200
 
 cm_l = np.zeros((110, 3), dtype=np.uint8)
 ss_l = np.zeros((2700, 3600), dtype=np.float32)
 rgbimg_l = np.zeros((2700, 3600, 3), dtype=np.uint8)
 
-k = Curnel(mapping)
-k.setDimensions(2700, 3600)
-k.setInput(cm=cm_l, ss=ss_l)
-k.setConstants(WIDTH=3600, HEIGHT=2700, RANGE_SCALE=99./32.)
-k.setLocal(row=0, maploc=0, d=0.0, val=0.0)
-k.setOutput(rgbimg=rgbimg_l)
-k.execute()
-
+print mapping(cm_l, ss_l, rgbimg_l)

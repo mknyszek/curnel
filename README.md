@@ -26,7 +26,7 @@ Usage
 -----
 
 Function definition:
-```
+```python
 @cuda(height=2700, width=3600, range_scale=99./32.)
 def mapping(cm, ss, rgbimg):
     x = threadIdx.x + blockIdx.x * blockDim.x
@@ -56,14 +56,14 @@ def mapping(cm, ss, rgbimg):
   
 Invocation:
   
-```
-x = mapping(cm, ss, rgbimg)
-print x
+```python
+>>> x = mapping(cm, ss, rgbimg)
+>>> print x
 ```
 
 Output:
 
-```
+```Cuda
 #include <stdint.h>
 
 #define width 3600

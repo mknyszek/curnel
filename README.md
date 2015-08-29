@@ -26,7 +26,7 @@ Usage
 -----
 
 Function definition:
-``@cuda(height=2700, width=3600, range_scale=99./32.)
+```@cuda(height=2700, width=3600, range_scale=99./32.)
 def mapping(cm, ss, rgbimg):
     x = threadIdx.x + blockIdx.x * blockDim.x
     y = threadIdx.y + blockIdx.y * blockDim.y
@@ -50,16 +50,16 @@ def mapping(cm, ss, rgbimg):
         else:
             rgbimg[row,x,0] = 190
             rgbimg[row,x,1] = 190
-            rgbimg[row,x,2] = 190``
+            rgbimg[row,x,2] = 190```
   
 Invocation:
   
-``x = mapping(cm, ss, rgbimg)
-print x``
+```x = mapping(cm, ss, rgbimg)
+print x```
 
 Output:
 
-``#include <stdint.h>
+```#include <stdint.h>
 
 #define width 3600
 #define range_scale 3.09375
@@ -92,7 +92,7 @@ __global__ void mapping(uint8_t* cm, float* ss, uint8_t* rgbimg) {
         }
         
     }
-}``
+}```
 
 TODO
 ----

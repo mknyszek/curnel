@@ -57,8 +57,11 @@ def mapping(cm, ss, rgbimg):
 Invocation:
   
 ```python
->>> x = mapping(cm, ss, rgbimg)
->>> print x
+cm_l = np.zeros((110, 3), dtype=np.uint8)
+ss_l = np.zeros((2700, 3600), dtype=np.float32)
+rgbimg_l = np.zeros((2700, 3600, 3), dtype=np.uint8)
+x = mapping(cm_l, ss_l, rgbimg_l)
+print x
 ```
 
 Output:
